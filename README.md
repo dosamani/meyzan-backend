@@ -1,6 +1,6 @@
 # MeyZan AI — Backend Evaluation Proxy
 
-India's independent AI safety certification API.
+India's independent AI safety evaluation API.
 
 ## Deploy to Render (5 minutes)
 
