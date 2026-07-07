@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -102,6 +103,29 @@ Return JSON evaluation only.`;
     result.domain = domain;
     result.language = language;
     result.model_used = model || 'unknown';
+
+    // Real cryptographic fingerprint — SHA-256 over the actual evaluated
+    // content and verdict, so it changes if the input or the result changes,
+    // and cannot be reproduced without knowing both. Client-side must not
+    // generate its own fingerprint; this is the only legitimate source.
+    const fingerprintSource = JSON.stringify({
+      eval_id: result.eval_id,
+      timestamp: result.timestamp,
+      domain,
+      language,
+      output,
+      verdict: result.verdict,
+      overall_score: result.overall_score,
+      hallucination_score: result.hallucination_score,
+      accuracy_score: result.accuracy_score,
+      safety_score: result.safety_score,
+      cultural_score: result.cultural_score
+    });
+    result.fingerprint = crypto
+      .createHash('sha256')
+      .update(fingerprintSource)
+      .digest('hex')
+      .toUpperCase();
 
     return res.json(result);
 
