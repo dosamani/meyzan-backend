@@ -106,7 +106,7 @@ ${output}
 Return JSON evaluation only.`;
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const callClaude = (modelName) => fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -114,20 +114,49 @@ Return JSON evaluation only.`;
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5',
+        model: modelName,
         max_tokens: 3000,
         system: systemPrompt,
         messages: [{ role: 'user', content: userMessage }]
       })
     });
 
-    if (!response.ok) {
-      const errText = await response.text();
+    const primaryModel = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5';
+    let usedModel = primaryModel;
+    let response = await callClaude(primaryModel);
+    let data = response.ok ? await response.json() : null;
+
+    // If the primary model errors or refuses, try a fallback model once.
+    // Set ANTHROPIC_FALLBACK_MODEL=none in Render to disable.
+    const fallbackModel = process.env.ANTHROPIC_FALLBACK_MODEL || 'claude-sonnet-5-5';
+    if ((!response.ok || (data && data.stop_reason === 'refusal')) && fallbackModel !== 'none' && fallbackModel !== primaryModel) {
+      console.error('Primary model ' + primaryModel + ' failed (' + (data ? 'stop_reason=' + data.stop_reason : 'HTTP ' + response.status) + '); trying fallback ' + fallbackModel);
+      try {
+        const r2 = await callClaude(fallbackModel);
+        if (r2.ok) {
+          const d2 = await r2.json();
+          if (d2.stop_reason !== 'refusal') { response = r2; data = d2; usedModel = fallbackModel; }
+          else { console.error('Fallback model also refused.'); }
+        } else {
+          console.error('Fallback model error:', r2.status, (await r2.text()).slice(0, 300));
+        }
+      } catch (fe) { console.error('Fallback call failed:', fe.message); }
+    }
+
+    if (!response.ok || !data) {
+      const errText = response.ok ? '' : await response.text();
       console.error('Anthropic API error:', response.status, errText);
       return res.status(502).json({ error: 'Evaluation engine unavailable. Try again shortly.' });
     }
 
-    const data = await response.json();
+    if (data.stop_reason === 'refusal') {
+      console.error('Model refused to evaluate this input (stop_reason=refusal).');
+      return res.status(422).json({
+        error: 'The evaluation model declined to process this content. The preliminary pattern result stands; human review is recommended.',
+        refused: true
+      });
+    }
+    console.log('Model used: ' + usedModel);
     const rawText = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
     console.log('Anthropic ok: stop_reason=' + data.stop_reason + ' blocks=' + (data.content || []).map(b => b.type).join(',') + ' chars=' + rawText.length + ' usage=' + JSON.stringify(data.usage || {}));
     if (!rawText.trim()) {
