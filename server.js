@@ -114,8 +114,8 @@ Return JSON evaluation only.`;
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-5',
-        max_tokens: 2000,
+        model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5',
+        max_tokens: 3000,
         system: systemPrompt,
         messages: [{ role: 'user', content: userMessage }]
       })
@@ -128,9 +128,22 @@ Return JSON evaluation only.`;
     }
 
     const data = await response.json();
-    const rawText = data.content?.find(b => b.type === 'text')?.text || '';
-    const cleaned = rawText.replace(/```json|```/g, '').trim();
-    const result = JSON.parse(cleaned);
+    const rawText = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+    console.log('Anthropic ok: stop_reason=' + data.stop_reason + ' blocks=' + (data.content || []).map(b => b.type).join(',') + ' chars=' + rawText.length + ' usage=' + JSON.stringify(data.usage || {}));
+    if (!rawText.trim()) {
+      console.error('Empty model output. stop_reason:', data.stop_reason);
+      return res.status(502).json({ error: 'Evaluation engine returned no content. Try again shortly.' });
+    }
+    // Take the JSON object even if the model wrapped it in text or code fences
+    const jStart = rawText.indexOf('{');
+    const jEnd = rawText.lastIndexOf('}');
+    let result;
+    try {
+      result = JSON.parse(jStart >= 0 && jEnd > jStart ? rawText.slice(jStart, jEnd + 1) : rawText);
+    } catch (parseErr) {
+      console.error('Unparseable model output (stop_reason ' + data.stop_reason + '):', rawText.slice(0, 300));
+      return res.status(502).json({ error: 'Evaluation engine returned an unreadable result. Try again shortly.' });
+    }
 
     // Add audit metadata
     result.eval_id = `MEYZAN-${Date.now()}`;
