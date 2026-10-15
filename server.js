@@ -14,8 +14,8 @@ app.use(express.json({ limit: '10kb' }));
 // Per-IP limit + global daily cap, in memory (resets on restart/redeploy).
 app.set('trust proxy', 1); // Render sits behind a proxy
 const RATE_WINDOW_MS = 60 * 60 * 1000;
-const RATE_MAX_PER_IP = parseInt(process.env.RATE_MAX_PER_IP || '15', 10);
-const DAILY_CAP = parseInt(process.env.DAILY_CAP || '500', 10);
+const RATE_MAX_PER_IP = parseInt(process.env.RATE_MAX_PER_IP || '40', 10);
+const DAILY_CAP = parseInt(process.env.DAILY_CAP || '250', 10);
 const ipHits = new Map();
 let dayKey = new Date().toISOString().slice(0, 10);
 let dayCount = 0;
