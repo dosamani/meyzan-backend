@@ -9,6 +9,41 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 app.use(cors());
 app.use(express.json({ limit: '10kb' }));
 
+// ── ABUSE PROTECTION (added Oct 2026) ──
+// The demo endpoint is public and every call spends Anthropic credits.
+// Per-IP limit + global daily cap, in memory (resets on restart/redeploy).
+app.set('trust proxy', 1); // Render sits behind a proxy
+const RATE_WINDOW_MS = 60 * 60 * 1000;
+const RATE_MAX_PER_IP = parseInt(process.env.RATE_MAX_PER_IP || '15', 10);
+const DAILY_CAP = parseInt(process.env.DAILY_CAP || '500', 10);
+const ipHits = new Map();
+let dayKey = new Date().toISOString().slice(0, 10);
+let dayCount = 0;
+
+app.use('/api/', (req, res, next) => {
+  if (req.method === 'OPTIONS') return next();
+  const today = new Date().toISOString().slice(0, 10);
+  if (today !== dayKey) { dayKey = today; dayCount = 0; }
+  if (dayCount >= DAILY_CAP) {
+    return res.status(429).json({ error: 'Daily demo capacity reached. Please try again tomorrow or contact the founder.' });
+  }
+  const now = Date.now();
+  const hits = (ipHits.get(req.ip) || []).filter(t => now - t < RATE_WINDOW_MS);
+  if (hits.length >= RATE_MAX_PER_IP) {
+    return res.status(429).json({ error: 'Too many requests from this address. Please try again later.' });
+  }
+  hits.push(now);
+  ipHits.set(req.ip, hits);
+  dayCount++;
+  next();
+});
+
+// Batch endpoint stays off unless explicitly enabled (it multiplies API spend).
+app.use('/api/evaluate/batch', (req, res, next) => {
+  if (process.env.ALLOW_BATCH === 'true') return next();
+  return res.status(403).json({ error: 'Batch evaluation is not enabled on the demo service.' });
+});
+
 // ── HEALTH CHECK ──
 app.get('/', (req, res) => {
   res.json({
