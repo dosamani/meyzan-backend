@@ -5,6 +5,49 @@ const crypto = require('crypto');
 const app = express();
 const PORT = process.env.PORT || 3001;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+// Judge provider: 'anthropic' (default) or 'sarvam'. Set JUDGE_PROVIDER in Render.
+// The judge should never be the same vendor as the AI system being evaluated.
+const JUDGE_PROVIDER = (process.env.JUDGE_PROVIDER || 'anthropic').toLowerCase();
+const SARVAM_API_KEY = process.env.SARVAM_API_KEY;
+const SARVAM_BASE_URL = process.env.SARVAM_BASE_URL || 'https://api.sarvam.ai';
+const SARVAM_MODEL = process.env.SARVAM_MODEL || 'sarvam-105b';
+const SARVAM_REASONING = process.env.SARVAM_REASONING || 'low'; // low|medium|high|none
+const JUDGE_VENDOR_KEYWORD = JUDGE_PROVIDER === 'sarvam' ? 'sarvam' : 'claude|anthropic';
+
+// Shared audit metadata + SHA-256 fingerprint (same for every judge provider).
+function finalizeResult(result, ctx, judgeLabel) {
+  const { domain, language, model, output } = ctx;
+  result.eval_id = `MEYZAN-${Date.now()}`;
+  result.timestamp = new Date().toISOString();
+  result.domain = domain;
+  result.language = language;
+  result.model_used = model || 'unknown';
+  result.judge = judgeLabel;
+  if (model && new RegExp(JUDGE_VENDOR_KEYWORD, 'i').test(String(model))) {
+    result.independence_warning = 'The judge model and the evaluated AI system appear to come from the same vendor. Use a different judge for an independent evaluation.';
+  }
+  const fingerprintSource = JSON.stringify({
+    eval_id: result.eval_id,
+    timestamp: result.timestamp,
+    domain,
+    language,
+    output,
+    verdict: result.verdict,
+    overall_score: result.overall_score,
+    hallucination_score: result.hallucination_score,
+    accuracy_score: result.accuracy_score,
+    safety_score: result.safety_score,
+    cultural_score: result.cultural_score
+  });
+  result.fingerprint = crypto.createHash('sha256').update(fingerprintSource).digest('hex').toUpperCase();
+  return result;
+}
+
+function parseJudgeJson(rawText) {
+  const jStart = rawText.indexOf('{');
+  const jEnd = rawText.lastIndexOf('}');
+  return JSON.parse(jStart >= 0 && jEnd > jStart ? rawText.slice(jStart, jEnd + 1) : rawText);
+}
 
 app.use(cors());
 app.use(express.json({ limit: '10kb' }));
@@ -71,9 +114,9 @@ app.post('/api/evaluate', async (req, res) => {
     });
   }
 
-  if (!ANTHROPIC_API_KEY) {
+  if (JUDGE_PROVIDER === 'sarvam' ? !SARVAM_API_KEY : !ANTHROPIC_API_KEY) {
     return res.status(500).json({
-      error: 'API key not configured. Set ANTHROPIC_API_KEY in environment variables.'
+      error: 'API key not configured for the selected judge provider.'
     });
   }
 
@@ -106,6 +149,42 @@ ${output}
 Return JSON evaluation only.`;
 
   try {
+    if (JUDGE_PROVIDER === 'sarvam') {
+      const sbody = {
+        model: SARVAM_MODEL,
+        max_tokens: 4096,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userMessage }
+        ]
+      };
+      if (SARVAM_REASONING !== 'none') sbody.reasoning_effort = SARVAM_REASONING;
+      const sr = await fetch(SARVAM_BASE_URL + '/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'api-subscription-key': SARVAM_API_KEY },
+        body: JSON.stringify(sbody)
+      });
+      if (!sr.ok) {
+        console.error('Sarvam API error:', sr.status, (await sr.text()).slice(0, 300));
+        return res.status(502).json({ error: 'Evaluation engine unavailable. Try again shortly.' });
+      }
+      const sd = await sr.json();
+      const choice = (sd.choices || [])[0] || {};
+      const sText = (choice.message && choice.message.content) || '';
+      console.log('Sarvam ok: finish_reason=' + choice.finish_reason + ' chars=' + sText.length + ' usage=' + JSON.stringify(sd.usage || {}));
+      if (!sText.trim()) {
+        console.error('Empty Sarvam output. finish_reason:', choice.finish_reason);
+        return res.status(502).json({ error: 'Evaluation engine returned no content. Try again shortly.' });
+      }
+      let sResult;
+      try { sResult = parseJudgeJson(sText); }
+      catch (e) {
+        console.error('Unparseable Sarvam output (finish_reason ' + choice.finish_reason + ', ' + sText.length + ' chars).');
+        return res.status(502).json({ error: 'Evaluation engine returned an unreadable result. Try again shortly.' });
+      }
+      return res.json(finalizeResult(sResult, { domain, language, model, output }, 'sarvam/' + SARVAM_MODEL));
+    }
+
     const callClaude = (modelName) => fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -174,35 +253,7 @@ Return JSON evaluation only.`;
       return res.status(502).json({ error: 'Evaluation engine returned an unreadable result. Try again shortly.' });
     }
 
-    // Add audit metadata
-    result.eval_id = `MEYZAN-${Date.now()}`;
-    result.timestamp = new Date().toISOString();
-    result.domain = domain;
-    result.language = language;
-    result.model_used = model || 'unknown';
-
-    // Real cryptographic fingerprint — SHA-256 over the actual evaluated
-    // content and verdict, so it changes if the input or the result changes,
-    // and cannot be reproduced without knowing both. Client-side must not
-    // generate its own fingerprint; this is the only legitimate source.
-    const fingerprintSource = JSON.stringify({
-      eval_id: result.eval_id,
-      timestamp: result.timestamp,
-      domain,
-      language,
-      output,
-      verdict: result.verdict,
-      overall_score: result.overall_score,
-      hallucination_score: result.hallucination_score,
-      accuracy_score: result.accuracy_score,
-      safety_score: result.safety_score,
-      cultural_score: result.cultural_score
-    });
-    result.fingerprint = crypto
-      .createHash('sha256')
-      .update(fingerprintSource)
-      .digest('hex')
-      .toUpperCase();
+    finalizeResult(result, { domain, language, model, output }, 'anthropic/' + usedModel);
 
     return res.json(result);
 
