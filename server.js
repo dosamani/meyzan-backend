@@ -260,8 +260,7 @@ Return JSON evaluation only.`;
   } catch (err) {
     console.error('Evaluation error:', err.message);
     return res.status(500).json({
-      error: 'Evaluation failed. Please try again.',
-      detail: err.message
+      error: 'Evaluation failed. Please try again.'
     });
   }
 });
